@@ -142,11 +142,16 @@ class PluginClass {
 
     injectLoginButton() {
         // Observe DOM changes to inject the button when the login page renders.
-        // Restrict to the login page: the `.signup-team__container` selector also
-        // matches the "select team" screen (/select_team), which is shown *after*
-        // a successful login, so it must not be used as an injection target there.
+        // Restrict to login and the invite/signup flow (/signup_user_complete,
+        // what invite links point at): the `.signup-team__container` selector
+        // also matches the "select team" screen (/select_team), which is shown
+        // *after* a successful login, so it must not be used as an injection
+        // target there, and this plugin has nothing useful to add on any other
+        // route.
         this.observer = new MutationObserver(() => {
-            if (!window.location.pathname.startsWith('/login')) {
+            const onLoginPage = window.location.pathname.startsWith('/login');
+            const onSignupPage = window.location.pathname.startsWith('/signup_user_complete');
+            if (!onLoginPage && !onSignupPage) {
                 return;
             }
             if (document.getElementById('oidc-login-button-container')) {
@@ -155,17 +160,20 @@ class PluginClass {
 
             const loginForm = document.querySelector('.signup-team__container, .login-body-card-content');
 
-            // Mattermost's own login page only renders the normal card (and thus
-            // the elements loginForm looks for above) if at least one of its own
-            // recognized sign-in methods is enabled — email, username, licensed
-            // LDAP, GitLab, Office365, Google, its own built-in OpenID, or licensed
-            // SAML (webapp/channels/src/components/login/login.tsx). It has no
-            // concept of a plugin-provided method, so on a server where this
-            // plugin is the *only* configured way to log in, none of those are
-            // true and it instead renders a static "no sign-in methods enabled"
-            // screen (.content-layout-column) and nothing else. Detect that screen
-            // and inject there too, replacing its now-misleading copy, or this
-            // button — and the only way to log in — would simply never appear.
+            // Both the login page and the invite/signup page only render their
+            // normal card (and thus the elements loginForm looks for above) if
+            // at least one of Mattermost's own recognized sign-in methods is
+            // enabled — email, username, licensed LDAP, GitLab, Office365,
+            // Google, its own built-in OpenID, or licensed SAML
+            // (webapp/channels/src/components/login/login.tsx and
+            // .../signup/signup.tsx). Neither has any concept of a
+            // plugin-provided method, so on a server where this plugin is the
+            // *only* configured way to log in, none of those are true and both
+            // pages instead render the same static "no sign-in methods
+            // enabled" screen (.content-layout-column) and nothing else.
+            // Detect that screen and inject there too, replacing its now-
+            // misleading copy, or this button — and the only way to log in or
+            // accept an invite — would simply never appear.
             const noMethodsScreen = document.querySelector('.content-layout-column');
 
             const target = loginForm || noMethodsScreen;
