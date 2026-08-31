@@ -51,6 +51,11 @@ type OAuthState struct {
 	// with the opener) but, instead of a 302, renders an HTML page that closes the
 	// popup and navigates the opener to the return path.
 	Popup bool `json:"popup,omitempty"`
+	// InviteID is a team's InviteId, carried through from a team invite link
+	// (/signup_user_complete/?id=<InviteId>) so the callback can join the user to
+	// that team once they're authenticated, the way core's own signup flow does
+	// via createUser's inviteId parameter. Empty for an ordinary login.
+	InviteID string `json:"invite_id,omitempty"`
 }
 
 // allowedMobileSchemes are the exact custom-scheme callback URLs the native
@@ -70,6 +75,57 @@ func isAllowedMobileScheme(redirect string) bool {
 		}
 	}
 	return false
+}
+
+// isPlausibleInviteID reports whether id looks like a Mattermost-generated
+// identifier: NewId() produces a 26-character lowercase alphanumeric string,
+// but the exact length isn't guaranteed to be stable, so this only rejects
+// what clearly isn't one (empty, oversized, or containing characters no
+// Mattermost ID would) rather than enforcing the exact format.
+func isPlausibleInviteID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// joinTeamByInviteID adds userID to the team whose InviteId matches inviteID,
+// carried through from a team invite link. The plugin API has no direct
+// "resolve team by invite ID" call (unlike the server-internal
+// GetTeamByInviteId core's own signup flow uses), so this resolves it by
+// listing teams and matching InviteId — fine at the scale a plugin operates
+// at. Best-effort: a user who successfully authenticated should still end up
+// logged in even if the team can't be resolved or they're already a member,
+// so failures are logged, not surfaced to the browser.
+func (p *Plugin) joinTeamByInviteID(userID, inviteID string) {
+	teams, appErr := p.API.GetTeams()
+	if appErr != nil {
+		p.API.LogError("Failed to list teams for invite join", "error", appErr.Error())
+		return
+	}
+
+	var team *model.Team
+	for _, t := range teams {
+		if t.InviteId == inviteID {
+			team = t
+			break
+		}
+	}
+	if team == nil {
+		p.API.LogWarn("No team matches invite_id from signup link", "invite_id", inviteID)
+		return
+	}
+
+	if _, appErr := p.API.CreateTeamMember(team.Id, userID); appErr != nil {
+		// Most commonly: the user is already a member (e.g. they'd logged in via
+		// this same invite link before) — not an error worth surfacing.
+		p.API.LogInfo("Could not add user to team from invite link", "team_id", team.Id, "user_id", userID, "error", appErr.Error())
+	}
 }
 
 // OIDCUserInfo holds the user information extracted from OIDC claims.
@@ -127,12 +183,21 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	// is ignored when a mobile redirect is present.
 	popup := mobileRedirect == "" && r.URL.Query().Get("popup") == "1"
 
+	// A team's InviteId is an opaque identifier, not free text — reject anything
+	// that doesn't look like one rather than storing arbitrary input in state.
+	inviteID := r.URL.Query().Get("invite_id")
+	if inviteID != "" && !isPlausibleInviteID(inviteID) {
+		p.API.LogWarn("Rejected malformed invite_id", "invite_id", inviteID)
+		inviteID = ""
+	}
+
 	state := OAuthState{
 		Token:          stateToken,
 		CreateAt:       time.Now().UnixMilli(),
 		ReturnTo:       returnTo,
 		MobileRedirect: mobileRedirect,
 		Popup:          popup,
+		InviteID:       inviteID,
 	}
 
 	stateBytes, err := json.Marshal(state)
@@ -310,6 +375,10 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		p.API.LogWarn("Bot account attempted OIDC login", "user_id", mmUser.Id, "email", userInfo.Email)
 		p.renderError(w, "Bot accounts cannot log in via OIDC.")
 		return
+	}
+
+	if state.InviteID != "" {
+		p.joinTeamByInviteID(mmUser.Id, state.InviteID)
 	}
 
 	// Create a user session with expiry from Mattermost config.
