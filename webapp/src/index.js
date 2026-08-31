@@ -186,8 +186,27 @@ class PluginClass {
                     loginForm.prepend(container);
                 }
             } else {
-                noMethodsScreen.innerHTML = '';
-                noMethodsScreen.appendChild(container);
+                // Keep the layout's own title/icon rather than blanking the whole
+                // card — wiping it left a large empty box with nothing but a
+                // floating button and no visual hierarchy. Replace only the
+                // now-misleading "no sign-in methods" message text, and drop the
+                // button into the layout's existing extra-content slot so it
+                // picks up the same spacing the component already provides.
+                const title = noMethodsScreen.querySelector('.content-layout-column-title');
+                if (title) {
+                    title.textContent = 'Log in';
+                }
+                const message = noMethodsScreen.querySelector('.content-layout-column-message');
+                if (message) {
+                    message.textContent = '';
+                }
+                let extraContent = noMethodsScreen.querySelector('.content-layout-column-extra-content');
+                if (!extraContent) {
+                    extraContent = document.createElement('div');
+                    extraContent.className = 'content-layout-column-extra-content';
+                    noMethodsScreen.appendChild(extraContent);
+                }
+                extraContent.appendChild(container);
             }
 
             // Render React component (React/ReactDOM are provided as globals by Mattermost)
