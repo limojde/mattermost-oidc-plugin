@@ -1,14 +1,10 @@
 # Mattermost / Mostlymatter OIDC Plugin
 
-A Mattermost / Mostlymatter plugin that adds **OpenID Connect (OIDC)** authentication
-for [Mattermost](https://mattermost.com) and [Mostlymatter](https://framagit.org/framasoft/framateam/mostlymatter)
-without an Enterprise license.
+A Mattermost / Mostlymatter plugin that adds **OpenID Connect (OIDC)** authentication for [Mattermost](https://mattermost.com) and [Mostlymatter](https://framagit.org/framasoft/framateam/mostlymatter) without an Enterprise license.
 
 ## Why this plugin?
 
-Mattermost restricts generic OIDC authentication to the Enterprise/Professional editions. The free Team Edition only
-supports GitLab as an SSO provider (and even this only in version 10). This plugin bypasses that limitation by
-implementing a full OIDC flow as a plugin that works with any standards-compliant OIDC provider.
+Mattermost restricts generic OIDC authentication to the Enterprise/Professional editions. The free Team Edition only supports GitLab as an SSO provider (and even this only in version 10). This plugin bypasses that limitation by implementing a full OIDC flow as a plugin that works with any standards-compliant OIDC provider.
 
 ### Supported OIDC Providers
 
@@ -23,6 +19,8 @@ implementing a full OIDC flow as a plugin that works with any standards-complian
 - **Azure AD / Entra ID**
 - **Google Workspace**
 - **Any other OIDC-compliant provider**
+
+Please note that the OIDC provider must support **PKCE S256** (standard with OAuth 2.1) and the OpenID Connect `nonce` claim, which is virtually the case for any modern OIDC provider though.
 
 ## Architecture
 
@@ -43,16 +41,14 @@ implementing a full OIDC flow as a plugin that works with any standards-complian
 5. Plugin exchanges the code for tokens, verifies the ID token
 6. Plugin creates/updates the Mattermost user and creates a session
 
-This covers **web and desktop** clients out of the box. For the **native mobile
-app**, an optional reverse-proxy shim ([`mobile-bridge/`](mobile-bridge/README.md))
-is required — see [Native mobile app](#native-mobile-app) below.
+This covers **web and desktop** clients out of the box. For the **native mobile app**, an optional reverse-proxy shim ([`mobile-bridge/`](mobile-bridge/README.md)) is required — see [Native mobile app](#native-mobile-app) below.
 
 ## Prerequisites
 
 - **Go** 1.26+
 - **Node.js** 22+ and npm
 - **Make**
-- Mattermost/Mostlymatter Server v9.0+
+- Mattermost / Mostlymatter Server v9.0+
 
 ## Build
 
@@ -138,9 +134,13 @@ Go to **System Console → Plugins → OIDC Authentication**:
 | **First Name Claim**                     | OIDC claim for first name         | `given_name`                                          |
 | **Last Name Claim**                      | OIDC claim for last name          | `family_name`                                         |
 | **Position Claim**                       | OIDC claim for position/job title | `position`                                            |
+| **Email Verified Claim**                 | OIDC claim for email verification | _(empty, set to `email_verified` to enable)_          |
+| **Require Email Verified**               | Reject login if claim is not true | `false`                                               |
 | **Auto-Create Accounts**                 | Automatically create new accounts | `true`                                                |
 | **Auto-Link Existing Accounts by Email** | Link existing accounts by email   | `false`                                               |
 | **Default Team**                         | Team slug for new users           | `main`                                                |
+
+When **Auto-Link Existing Accounts by Email** is enabled, consider also enabling **Require Email Verified** after setting **Email Verified Claim** to `email_verified` (or your provider's claim name) if your identity provider sends that claim. This prevents linking to an existing account via an unverified email address.
 
 ### 3. Restart the server
 
@@ -201,6 +201,8 @@ mattermost-oidc-plugin/
 ## Security
 
 - **HMAC-signed state parameters** prevent CSRF attacks
+- **PKCE S256** is always sent on the authorization request
+- **`nonce`** is always sent and checked on the ID token
 - **State tokens** are stored in the KV store with an expiry time
 - **ID token verification** via the provider's JWKS
 - **No client secret** is sent to the browser
@@ -215,16 +217,9 @@ This plugin creates sessions directly after a successful OIDC flow and does **no
 
 ## Native mobile app
 
-The plugin's login button only renders in the web and desktop clients. The
-**native Mattermost mobile app** hardcodes its SSO to the core OpenID flow: it
-shows an OpenID button only when the *client config* advertises it, and always
-posts the flow to the core endpoint `/oauth/openid/mobile_login` — neither of
-which a plugin can influence.
+The plugin's login button only renders in the web and desktop clients. The **native Mattermost mobile app** hardcodes its SSO to the core OpenID flow: it shows an OpenID button only when the *client config* advertises it, and always posts the flow to the core endpoint `/oauth/openid/mobile_login` — neither of which a plugin can influence.
 
-To bridge this, the repository ships an optional reverse-proxy shim in
-[`mobile-bridge/`](mobile-bridge/README.md). Placed in front of Mattermost in your
-ingress, it intercepts exactly two paths for mobile clients and forwards
-everything else (REST, WebSocket, files, `/plugins/...`) untouched:
+To bridge this, the repository ships an optional reverse-proxy shim in [`mobile-bridge/`](mobile-bridge/README.md). Placed in front of Mattermost in your ingress, it intercepts exactly two paths for mobile clients and forwards everything else (REST, WebSocket, files, `/plugins/...`) untouched:
 
 ```
 mobile app ──▶ ingress ──▶ /api/v4/config/client      → bridge (inject EnableSignUpWithOpenId=true, mobile UA only)
@@ -232,10 +227,7 @@ mobile app ──▶ ingress ──▶ /api/v4/config/client      → bridge (in
                            everything else            → Mattermost
 ```
 
-The plugin side handles the mobile callback by handing the session token back to
-the app via its custom URL scheme (`mmauth://callback?MMAUTHTOKEN=…&MMCSRF=…`),
-mirroring Mattermost core's `mobile_login` flow. Web and desktop clients are
-completely unaffected.
+The plugin side handles the mobile callback by handing the session token back to the app via its custom URL scheme (`mmauth://callback?MMAUTHTOKEN=…&MMCSRF=…`), mirroring Mattermost core's `mobile_login` flow. Web and desktop clients are completely unaffected.
 
 
 ## Troubleshooting
@@ -272,8 +264,7 @@ docker-compose -f docker-compose.dev.yml up -d
 docker-compose -f docker-compose.dev.yml down
 ```
 
-After starting Mattermost / Mostlymatter: create an admin account, enable plugin uploads under **System Console → Plugin
-Management**, then upload the built bundle.
+After starting Mattermost / Mostlymatter: create an admin account, enable plugin uploads under **System Console → Plugin Management**, then upload the built bundle.
 
 ### Build & Deploy
 

@@ -91,6 +91,18 @@ func TestConfigurationIsValid(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "require email verified without claim is invalid",
+			config: Configuration{
+				Enable:               true,
+				IssuerURL:            "https://idp.example.com/.well-known/openid-configuration",
+				ClientID:             "my-client",
+				ClientSecret:         "my-secret",
+				Scopes:               "openid profile email",
+				RequireEmailVerified: true,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

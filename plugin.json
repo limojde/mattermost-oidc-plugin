@@ -4,7 +4,7 @@
     "description": "OpenID Connect (OIDC) authentication plugin for Mostlymatter/Mattermost. Enables SSO login via any standard OIDC provider (Keycloak, Authentik, Authelia, Dex, etc.) without requiring an Enterprise license.",
     "homepage_url": "https://server.camp",
     "icon_path": "assets/oidc-icon.svg",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "min_server_version": "9.0.0",
     "server": {
         "executables": {
@@ -109,6 +109,21 @@
                 "help_text": "The OIDC claim to use for the user's position / job title (e.g., 'position', 'job_title', 'jobTitle', 'title'). Leave empty to disable position syncing. When configured, this field will be updated from the OIDC provider on login.",
                 "default": "",
                 "placeholder": "position"
+            },
+            {
+                "key": "EmailVerifiedClaim",
+                "display_name": "Email Verified Claim",
+                "type": "text",
+                "help_text": "The OIDC claim that indicates whether the user's email address has been verified by the identity provider (standard: 'email_verified'). When present in the ID token or userinfo response, the value is synced to the Mattermost user's 'EmailVerified' field on every login. Leave empty to disable reading this claim. Note that, depending on the OIDC provider, you may have have to explicitly include 'email_verified' as another request claim scope above in order for it being returned.",
+                "default": "",
+                "placeholder": "email_verified"
+            },
+            {
+                "key": "RequireEmailVerified",
+                "display_name": "Require Email Verified",
+                "type": "bool",
+                "help_text": "When enabled, login is rejected unless the email verified claim is true. No account is created, linked, or given a session. Warning: many OIDC providers do not send this claim, enabling this without provider support will block all logins.",
+                "default": false
             },
             {
                 "key": "AutoCreateAccounts",

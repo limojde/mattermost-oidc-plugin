@@ -188,6 +188,7 @@ func (p *Plugin) initOIDCProvider() error {
 	p.API.LogInfo("OIDC provider initialized successfully",
 		"issuer_url", config.IssuerURL,
 		"redirect_url", redirectURL,
+		"pkce", "S256",
 	)
 	return nil
 }

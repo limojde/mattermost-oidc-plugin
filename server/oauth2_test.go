@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/mock"
+	"golang.org/x/oauth2"
 )
 
 func TestGetStringClaim(t *testing.T) {
@@ -41,6 +43,42 @@ func TestGetStringClaim(t *testing.T) {
 			result := getStringClaim(claims, tt.key)
 			if result != tt.expected {
 				t.Errorf("getStringClaim(%q) = %q, want %q", tt.key, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetBoolClaim(t *testing.T) {
+	claims := map[string]interface{}{
+		"email_verified": true,
+		"verified_str":   "true",
+		"false_str":      "false",
+		"numeric_value":  1,
+	}
+
+	tests := []struct {
+		name     string
+		key      string
+		expected *bool
+	}{
+		{"bool true", "email_verified", model.NewPointer(true)},
+		{"string true", "verified_str", model.NewPointer(true)},
+		{"string false", "false_str", model.NewPointer(false)},
+		{"missing claim", "missing", nil},
+		{"empty key", "", nil},
+		{"unexpected type", "numeric_value", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getBoolClaim(claims, tt.key)
+			switch {
+			case tt.expected == nil && got != nil:
+				t.Errorf("getBoolClaim(%q) = %v, want nil", tt.key, *got)
+			case tt.expected != nil && got == nil:
+				t.Errorf("getBoolClaim(%q) = nil, want %v", tt.key, *tt.expected)
+			case tt.expected != nil && got != nil && *got != *tt.expected:
+				t.Errorf("getBoolClaim(%q) = %v, want %v", tt.key, *got, *tt.expected)
 			}
 		})
 	}
@@ -327,4 +365,99 @@ func TestUpdateUserIfChanged(t *testing.T) {
 		}
 		api.AssertExpectations(t)
 	})
+
+	t.Run("email verified revoked by provider", func(t *testing.T) {
+		api := &plugintest.API{}
+		p := &Plugin{}
+		p.SetAPI(api)
+
+		user := &model.User{
+			Id:            "user-1",
+			Email:         "user@example.com",
+			EmailVerified: true,
+		}
+		info := &OIDCUserInfo{
+			Email:         "user@example.com",
+			EmailVerified: model.NewPointer(false),
+		}
+
+		api.On("UpdateUser", mock.MatchedBy(func(u *model.User) bool {
+			return u.Id == "user-1" && !u.EmailVerified
+		})).Return(func(u *model.User) *model.User {
+			return u
+		}, nil)
+
+		updated, err := p.updateUserIfChanged(user, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if updated.EmailVerified {
+			t.Error("EmailVerified should be false after provider downgrade")
+		}
+		api.AssertExpectations(t)
+	})
+
+	t.Run("nil email verified claim leaves user untouched", func(t *testing.T) {
+		p := &Plugin{}
+		user := &model.User{
+			Id:            "user-1",
+			Email:         "user@example.com",
+			EmailVerified: true,
+		}
+		info := &OIDCUserInfo{
+			Email:         "user@example.com",
+			EmailVerified: nil,
+		}
+
+		updated, err := p.updateUserIfChanged(user, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !updated.EmailVerified {
+			t.Error("EmailVerified should remain true when claim is absent")
+		}
+	})
+}
+
+func TestNonceMatches(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected string
+		got      string
+		want     bool
+	}{
+		{"equal", "abc123", "abc123", true},
+		{"mismatch", "abc123", "other", false},
+		{"empty got", "abc123", "", false},
+		{"empty expected", "", "abc123", false},
+		{"both empty", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nonceMatches(tt.expected, tt.got); got != tt.want {
+				t.Errorf("nonceMatches(%q, %q) = %v, want %v", tt.expected, tt.got, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOAuthStatePKCENonceRoundTrip(t *testing.T) {
+	orig := OAuthState{
+		Token:        "tok",
+		CreateAt:     1,
+		ReturnTo:     "/",
+		CodeVerifier: oauth2.GenerateVerifier(),
+		Nonce:        "deadbeef",
+	}
+	raw, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got OAuthState
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.CodeVerifier != orig.CodeVerifier || got.Nonce != orig.Nonce {
+		t.Errorf("round-trip = %+v, want verifier/nonce from %+v", got, orig)
+	}
 }

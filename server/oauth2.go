@@ -51,6 +51,11 @@ type OAuthState struct {
 	// with the opener) but, instead of a 302, renders an HTML page that closes the
 	// popup and navigates the opener to the return path.
 	Popup bool `json:"popup,omitempty"`
+	// CodeVerifier is the PKCE S256 verifier (RFC 7636). Stored in KV, never in the URL state parameter.
+	CodeVerifier string `json:"code_verifier,omitempty"`
+	// Nonce is sent on the authorization request and must match the ID token
+	// nonce claim after verification (OIDC Core 3.1.3.7).
+	Nonce string `json:"nonce,omitempty"`
 	// InviteID is a team's InviteId, carried through from a team invite link
 	// (/signup_user_complete/?id=<InviteId>) so the callback can join the user to
 	// that team once they're authenticated, the way core's own signup flow does
@@ -132,12 +137,13 @@ func (p *Plugin) joinTeamByInviteID(userID, inviteID string) {
 
 // OIDCUserInfo holds the user information extracted from OIDC claims.
 type OIDCUserInfo struct {
-	Subject   string `json:"sub"`
-	Email     string `json:"email"`
-	Username  string `json:"username"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Position  string `json:"position,omitempty"`
+	Subject       string `json:"sub"`
+	Email         string `json:"email"`
+	Username      string `json:"username"`
+	FirstName     string `json:"first_name"`
+	LastName      string `json:"last_name"`
+	Position      string `json:"position,omitempty"`
+	EmailVerified *bool  `json:"email_verified,omitempty"`
 }
 
 // handleOAuth2Connect initiates the OIDC login flow by redirecting the user
@@ -185,6 +191,13 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	// is ignored when a mobile redirect is present.
 	popup := mobileRedirect == "" && r.URL.Query().Get("popup") == "1"
 
+	nonce, err := generateRandomKey(16)
+	if err != nil {
+		p.API.LogError("Failed to generate OIDC nonce", "error", err.Error())
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
 	// A team's InviteId is an opaque identifier, not free text — reject anything
 	// that doesn't look like one rather than storing arbitrary input in state.
 	inviteID := r.URL.Query().Get("invite_id")
@@ -199,8 +212,17 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 		ReturnTo:       returnTo,
 		MobileRedirect: mobileRedirect,
 		Popup:          popup,
+		Nonce:          nonce,
 		InviteID:       inviteID,
 	}
+
+	authOpts := []oauth2.AuthCodeOption{
+		oauth2.AccessTypeOnline,
+		oauth2.SetAuthURLParam("nonce", nonce),
+	}
+	codeVerifier := oauth2.GenerateVerifier()
+	state.CodeVerifier = codeVerifier
+	authOpts = append(authOpts, oauth2.S256ChallengeOption(codeVerifier))
 
 	stateBytes, err := json.Marshal(state)
 	if err != nil {
@@ -223,7 +245,7 @@ func (p *Plugin) handleOAuth2Connect(w http.ResponseWriter, r *http.Request) {
 	p.setStateCookie(w, stateToken)
 
 	// Redirect to the OIDC provider
-	authURL := oauthConfig.AuthCodeURL(signedState, oauth2.AccessTypeOnline)
+	authURL := oauthConfig.AuthCodeURL(signedState, authOpts...)
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -330,7 +352,12 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	token, err := oauthConfig.Exchange(ctx, code)
+	var exchangeOpts []oauth2.AuthCodeOption
+	if state.CodeVerifier != "" {
+		exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(state.CodeVerifier))
+	}
+
+	token, err := oauthConfig.Exchange(ctx, code, exchangeOpts...)
 	if err != nil {
 		p.API.LogError("Failed to exchange authorization code", "error", err.Error())
 		p.renderError(w, "Failed to complete authentication. Please try again.")
@@ -352,11 +379,23 @@ func (p *Plugin) handleOAuth2Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !nonceMatches(state.Nonce, idToken.Nonce) {
+		p.API.LogError("OIDC nonce mismatch or missing in ID token")
+		p.renderError(w, "Authentication failed: invalid ID token")
+		return
+	}
+
 	// Extract user claims
 	userInfo, err := p.extractUserInfo(ctx, idToken, token, config)
 	if err != nil {
 		p.API.LogError("Failed to extract user info", "error", err.Error())
 		p.renderError(w, "Failed to read user information from identity provider")
+		return
+	}
+
+	if config.RequireEmailVerified && (userInfo.EmailVerified == nil || !*userInfo.EmailVerified) {
+		p.API.LogWarn("Rejected OIDC login: email not verified by provider", "email", userInfo.Email, "subject", userInfo.Subject, "claim", config.EmailVerifiedClaim)
+		p.renderError(w, "Your email address is not verified by your identity provider.")
 		return
 	}
 
@@ -600,12 +639,13 @@ func (p *Plugin) extractUserInfo(ctx context.Context, idToken *oidc.IDToken, oau
 	p.API.LogDebug("OIDC claims received", "claim_keys", strings.Join(claimKeys, ", "))
 
 	info := &OIDCUserInfo{
-		Subject:   idToken.Subject,
-		Email:     getStringClaim(claims, config.EmailClaim),
-		Username:  getStringClaim(claims, config.UsernameClaim),
-		FirstName: getStringClaim(claims, config.FirstNameClaim),
-		LastName:  getStringClaim(claims, config.LastNameClaim),
-		Position:  getStringClaim(claims, config.PositionClaim),
+		Subject:       idToken.Subject,
+		Email:         getStringClaim(claims, config.EmailClaim),
+		Username:      getStringClaim(claims, config.UsernameClaim),
+		FirstName:     getStringClaim(claims, config.FirstNameClaim),
+		LastName:      getStringClaim(claims, config.LastNameClaim),
+		Position:      getStringClaim(claims, config.PositionClaim),
+		EmailVerified: getBoolClaim(claims, config.EmailVerifiedClaim),
 	}
 
 	// Fallback: use email prefix as username if no username claim found
@@ -684,7 +724,7 @@ func (p *Plugin) getOrCreateUser(userInfo *OIDCUserInfo, config *Configuration) 
 		Position:      userInfo.Position,
 		AuthService:   AuthService,
 		AuthData:      model.NewPointer(userInfo.Subject),
-		EmailVerified: true,
+		EmailVerified: userInfo.EmailVerified == nil || *userInfo.EmailVerified,
 	}
 
 	createdUser, appErr := p.API.CreateUser(newUser)
@@ -747,6 +787,10 @@ func (p *Plugin) updateUserIfChanged(user *model.User, info *OIDCUserInfo) (*mod
 	}
 	if info.Position != "" && user.Position != info.Position {
 		user.Position = info.Position
+		changed = true
+	}
+	if info.EmailVerified != nil && user.EmailVerified != *info.EmailVerified {
+		user.EmailVerified = *info.EmailVerified
 		changed = true
 	}
 
@@ -894,6 +938,25 @@ func getStringClaim(claims map[string]interface{}, key string) string {
 	return ""
 }
 
+func getBoolClaim(claims map[string]interface{}, key string) *bool {
+	if key == "" {
+		return nil
+	}
+	val, ok := claims[key]
+	if !ok {
+		return nil
+	}
+	switch v := val.(type) {
+	case bool:
+		return model.NewPointer(v)
+	case string:
+		if b, err := strconv.ParseBool(v); err == nil {
+			return model.NewPointer(b)
+		}
+	}
+	return nil
+}
+
 // sanitizeUsername makes a username compatible with Mattermost's requirements.
 func sanitizeUsername(username string) string {
 	username = strings.ToLower(username)
@@ -927,4 +990,12 @@ func sanitizeUsername(username string) string {
 	}
 
 	return result
+}
+
+// nonceMatches reports whether the ID token nonce equals the value stored at connect. An empty expected nonce is a failure: we always send one.
+func nonceMatches(expected, got string) bool {
+	if expected == "" {
+		return false
+	}
+	return hmac.Equal([]byte(expected), []byte(got))
 }
