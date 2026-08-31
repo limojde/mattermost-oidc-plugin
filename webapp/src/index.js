@@ -149,12 +149,35 @@ class PluginClass {
             if (!window.location.pathname.startsWith('/login')) {
                 return;
             }
-            const loginForm = document.querySelector('.signup-team__container, .login-body-card-content');
-            if (loginForm && !document.getElementById('oidc-login-button-container')) {
-                const container = document.createElement('div');
-                container.id = 'oidc-login-button-container';
-                container.style.marginBottom = '16px';
+            if (document.getElementById('oidc-login-button-container')) {
+                return;
+            }
 
+            const loginForm = document.querySelector('.signup-team__container, .login-body-card-content');
+
+            // Mattermost's own login page only renders the normal card (and thus
+            // the elements loginForm looks for above) if at least one of its own
+            // recognized sign-in methods is enabled — email, username, licensed
+            // LDAP, GitLab, Office365, Google, its own built-in OpenID, or licensed
+            // SAML (webapp/channels/src/components/login/login.tsx). It has no
+            // concept of a plugin-provided method, so on a server where this
+            // plugin is the *only* configured way to log in, none of those are
+            // true and it instead renders a static "no sign-in methods enabled"
+            // screen (.content-layout-column) and nothing else. Detect that screen
+            // and inject there too, replacing its now-misleading copy, or this
+            // button — and the only way to log in — would simply never appear.
+            const noMethodsScreen = document.querySelector('.content-layout-column');
+
+            const target = loginForm || noMethodsScreen;
+            if (!target) {
+                return;
+            }
+
+            const container = document.createElement('div');
+            container.id = 'oidc-login-button-container';
+            container.style.marginBottom = '16px';
+
+            if (loginForm) {
                 // Insert before the form
                 const form = loginForm.querySelector('form');
                 if (form) {
@@ -162,24 +185,27 @@ class PluginClass {
                 } else {
                     loginForm.prepend(container);
                 }
-
-                // Render React component (React/ReactDOM are provided as globals by Mattermost)
-                const ReactLib = window.React;
-                const ReactDOM = window.ReactDOM;
-                if (!ReactLib || !ReactDOM) {
-                    console.warn('OIDC plugin: React/ReactDOM globals not available');
-                    return;
-                }
-                if (ReactDOM.createRoot) {
-                    this.reactRoot = ReactDOM.createRoot(container);
-                    this.reactRoot.render(ReactLib.createElement(OIDCLoginButton));
-                } else {
-                    ReactDOM.render(ReactLib.createElement(OIDCLoginButton), container);
-                }
-
-                // Button injected — stop observing
-                this.observer.disconnect();
+            } else {
+                noMethodsScreen.innerHTML = '';
+                noMethodsScreen.appendChild(container);
             }
+
+            // Render React component (React/ReactDOM are provided as globals by Mattermost)
+            const ReactLib = window.React;
+            const ReactDOM = window.ReactDOM;
+            if (!ReactLib || !ReactDOM) {
+                console.warn('OIDC plugin: React/ReactDOM globals not available');
+                return;
+            }
+            if (ReactDOM.createRoot) {
+                this.reactRoot = ReactDOM.createRoot(container);
+                this.reactRoot.render(ReactLib.createElement(OIDCLoginButton));
+            } else {
+                ReactDOM.render(ReactLib.createElement(OIDCLoginButton), container);
+            }
+
+            // Button injected — stop observing
+            this.observer.disconnect();
         });
 
         this.observer.observe(document.body, {childList: true, subtree: true});
