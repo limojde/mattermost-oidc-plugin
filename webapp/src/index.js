@@ -58,8 +58,17 @@ const OIDCLoginButton = () => {
     }
 
     const handleClick = () => {
-        const returnTo = new URLSearchParams(window.location.search).get('redirect_to') || '/';
-        const base = `/plugins/${PLUGIN_ID}/oauth2/connect?return_to=${encodeURIComponent(returnTo)}`;
+        const params = new URLSearchParams(window.location.search);
+        const returnTo = params.get('redirect_to') || '/';
+        // Team invite links (/signup_user_complete/?id=<inviteId>) don't carry any
+        // OIDC context of their own; this is the only place that ID is available
+        // before the redirect to the IdP, so it has to be forwarded here for the
+        // callback to join the user to that team once they're authenticated.
+        const inviteId = params.get('id') || '';
+        let base = `/plugins/${PLUGIN_ID}/oauth2/connect?return_to=${encodeURIComponent(returnTo)}`;
+        if (inviteId) {
+            base += `&invite_id=${encodeURIComponent(inviteId)}`;
+        }
 
         // The popup is only needed inside the Mattermost Desktop app (Electron): it
         // hard-blocks the main window from navigating to the external identity provider
